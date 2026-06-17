@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 user_last_action = defaultdict(float)
 SPAM_COOLDOWN = 1
 
+# Флаг активной рассылки (чтобы не запускать несколько одновременно)
+broadcast_in_progress = False
+
 
 # FSM состояния
 class Form(StatesGroup):
@@ -1012,6 +1015,8 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
     @dp.channel_post()
     async def handle_channel_post(message: types.Message):
         """Обработка постов из канала для рассылки новостей"""
+        global broadcast_in_progress
+        
         try:
             # Проверяем, что пост из нужного канала
             if message.chat.id != NEWS_CHANNEL_ID:
@@ -1019,6 +1024,20 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 return
             
             logger.info(f"Channel post from correct channel {NEWS_CHANNEL_ID}")
+            
+            # Проверяем, не идёт ли уже рассылка
+            if broadcast_in_progress:
+                logger.warning("Broadcast already in progress, skipping")
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await bot.send_message(
+                            admin_id, 
+                            "⚠️ <b>Рассылка уже идёт!</b>\n\nДождитесь завершения текущей рассылки.",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+                return
             
             # Проверяем наличие хэштега #новости
             if not message.text and not message.caption:
@@ -1033,6 +1052,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 return
             
             logger.info(f"News post detected from channel {NEWS_CHANNEL_ID}, starting broadcast")
+            broadcast_in_progress = True
             
             # Получаем всех пользователей из базы
             try:
@@ -1042,11 +1062,13 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 logger.info(f"Found {len(users)} users for broadcast")
             except Exception as e:
                 logger.error(f"Failed to get users from database: {e}")
+                broadcast_in_progress = False
                 return
             
             # Счётчики успешных/неудачных отправок
             success_count = 0
             fail_count = 0
+            blocked_count = 0
             
             # Отправляем новость всем пользователям
             for user in users:
@@ -1054,19 +1076,28 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 try:
                     await message.forward(user_id)
                     success_count += 1
-                    await asyncio.sleep(0.05)  # Небольшая задержка между отправками
+                    await asyncio.sleep(0.04)  # Задержка 40мс между сообщениями (безопасно для Telegram)
                 except Exception as e:
                     fail_count += 1
-                    logger.error(f"Failed to send news to user {user_id}: {e}")
+                    error_msg = str(e).lower()
+                    # Проверяем, заблокировал ли пользователь бота
+                    if "bot was blocked" in error_msg or "user is deactivated" in error_msg or "chat not found" in error_msg:
+                        blocked_count += 1
+                        logger.debug(f"User {user_id} blocked bot or deleted account")
+                    else:
+                        logger.error(f"Failed to send news to user {user_id}: {e}")
             
-            logger.info(f"News broadcast completed: {success_count} success, {fail_count} failed")
+            logger.info(f"News broadcast completed: {success_count} success, {fail_count} failed ({blocked_count} blocked)")
+            broadcast_in_progress = False
             
             # Отправляем отчет админам
             report = (
                 f"📰 <b>Рассылка новостей завершена</b>\n\n"
-                f"✅ Успешно отправлено: {success_count}\n"
-                f"❌ Не удалось отправить: {fail_count}\n"
-                f"👥 Всего пользователей: {len(users)}"
+                f"✅ Успешно отправлено: <b>{success_count}</b>\n"
+                f"❌ Не удалось отправить: <b>{fail_count}</b>\n"
+                f"🚫 Из них заблокировали бота: <b>{blocked_count}</b>\n"
+                f"👥 Всего пользователей: <b>{len(users)}</b>\n\n"
+                f"📊 Активные пользователи: <b>{success_count}</b> ({success_count * 100 // max(len(users), 1)}%)"
             )
             
             for admin_id in ADMIN_IDS:
@@ -1078,12 +1109,15 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
             
         except Exception as e:
             logger.error(f"Error in news broadcast: {e}")
+            broadcast_in_progress = False
     
     
     # Обработчик РЕДАКТИРОВАННЫХ постов из канала с хэштегами #новости и #upd
     @dp.edited_channel_post()
     async def handle_edited_channel_post(message: types.Message):
         """Обработка отредактированных постов из канала для повторной рассылки"""
+        global broadcast_in_progress
+        
         try:
             # Проверяем, что пост из нужного канала
             if message.chat.id != NEWS_CHANNEL_ID:
@@ -1091,6 +1125,20 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 return
             
             logger.info(f"Edited channel post from correct channel {NEWS_CHANNEL_ID}")
+            
+            # Проверяем, не идёт ли уже рассылка
+            if broadcast_in_progress:
+                logger.warning("Broadcast already in progress, skipping edited post")
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await bot.send_message(
+                            admin_id, 
+                            "⚠️ <b>Рассылка уже идёт!</b>\n\nДождитесь завершения текущей рассылки перед отправкой обновлений.",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+                return
             
             # Проверяем наличие текста
             if not message.text and not message.caption:
@@ -1110,6 +1158,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 return
             
             logger.info(f"Edited news post with #upd detected from channel {NEWS_CHANNEL_ID}, starting broadcast")
+            broadcast_in_progress = True
             
             # Получаем всех пользователей из базы
             try:
@@ -1119,11 +1168,13 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 logger.info(f"Found {len(users)} users for broadcast")
             except Exception as e:
                 logger.error(f"Failed to get users from database: {e}")
+                broadcast_in_progress = False
                 return
             
             # Счётчики успешных/неудачных отправок
             success_count = 0
             fail_count = 0
+            blocked_count = 0
             
             # Отправляем обновлённую новость всем пользователям
             for user in users:
@@ -1131,19 +1182,28 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
                 try:
                     await message.forward(user_id)
                     success_count += 1
-                    await asyncio.sleep(0.05)  # Небольшая задержка между отправками
+                    await asyncio.sleep(0.04)  # Задержка 40мс между сообщениями (безопасно для Telegram)
                 except Exception as e:
                     fail_count += 1
-                    logger.error(f"Failed to send updated news to user {user_id}: {e}")
+                    error_msg = str(e).lower()
+                    # Проверяем, заблокировал ли пользователь бота
+                    if "bot was blocked" in error_msg or "user is deactivated" in error_msg or "chat not found" in error_msg:
+                        blocked_count += 1
+                        logger.debug(f"User {user_id} blocked bot or deleted account")
+                    else:
+                        logger.error(f"Failed to send updated news to user {user_id}: {e}")
             
-            logger.info(f"Updated news broadcast completed: {success_count} success, {fail_count} failed")
+            logger.info(f"Updated news broadcast completed: {success_count} success, {fail_count} failed ({blocked_count} blocked)")
+            broadcast_in_progress = False
             
             # Отправляем отчет админам
             report = (
                 f"🔄 <b>Рассылка обновлённых новостей завершена</b>\n\n"
-                f"✅ Успешно отправлено: {success_count}\n"
-                f"❌ Не удалось отправить: {fail_count}\n"
-                f"👥 Всего пользователей: {len(users)}\n\n"
+                f"✅ Успешно отправлено: <b>{success_count}</b>\n"
+                f"❌ Не удалось отправить: <b>{fail_count}</b>\n"
+                f"🚫 Из них заблокировали бота: <b>{blocked_count}</b>\n"
+                f"👥 Всего пользователей: <b>{len(users)}</b>\n\n"
+                f"📊 Активные пользователи: <b>{success_count}</b> ({success_count * 100 // max(len(users), 1)}%)\n"
                 f"ℹ️ Отредактированный пост с #upd"
             )
             
@@ -1156,5 +1216,6 @@ def register_handlers(dp: Dispatcher, bot: Bot, db):
             
         except Exception as e:
             logger.error(f"Error in updated news broadcast: {e}")
+            broadcast_in_progress = False
     
     logger.info("All handlers registered")
