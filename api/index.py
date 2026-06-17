@@ -46,6 +46,7 @@ logger.info("Bot initialized for serverless")
 
 
 @app.post(WEBHOOK_PATH)
+@app.post("/")
 async def webhook(request: Request):
     """Обработка вебхуков от Telegram"""
     try:
@@ -86,16 +87,17 @@ async def setup_webhook():
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Old webhook deleted")
         
-        # Устанавливаем новый
+        # Устанавливаем новый с поддержкой channel_post и edited_channel_post
         await bot.set_webhook(
             url=webhook_url,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "channel_post", "edited_channel_post"]
         )
         
         # Проверяем
         webhook_info = await bot.get_webhook_info()
         
-        logger.info(f"Webhook set to: {webhook_url}")
+        logger.info(f"Webhook set to: {webhook_url} with channel_post and edited_channel_post support")
         
         return {
             "status": "success",
@@ -104,6 +106,7 @@ async def setup_webhook():
                 "url": webhook_info.url,
                 "has_custom_certificate": webhook_info.has_custom_certificate,
                 "pending_update_count": webhook_info.pending_update_count,
+                "allowed_updates": ["message", "callback_query", "channel_post", "edited_channel_post"]
             }
         }
     
